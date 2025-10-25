@@ -1,8 +1,11 @@
-name: WAZE snapshot Bogotá (hourly, auto-stop Tue 2025-10-28)
+name: WAZE snapshot Bogotá (hourly, debug)
+
+permissions:
+  contents: write
 
 on:
   schedule:
-    - cron: '0 * * * *'   # cada hora UTC
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,14 +18,20 @@ jobs:
       - name: Check date and stop after 2025-10-28 (UTC)
         shell: bash
         run: |
-          # Fecha límite (inclusive) en UTC: 2025-10-31 23:59:59 UTC
-          LIM="2025-10-31T23:59:59Z"
+          LIM="2025-10-28T23:59:59Z"
           NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           echo "Now (UTC): $NOW  — limit (UTC): $LIM"
           if [[ "$NOW" > "$LIM" ]]; then
             echo "La fecha límite ya pasó. Terminando job sin ejecutar."
             exit 0
           fi
+
+      - name: Show repo root files (after checkout)
+        shell: bash
+        run: |
+          echo "PWD: $(pwd)"
+          echo "Listing repo root:"
+          ls -la
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -32,28 +41,57 @@ jobs:
       - name: Install dependencies
         run: pip install requests pandas python-dateutil
 
-      - name: Run snapshot script (tries scripts/fetch_and_append.py, else trancones)
+      - name: Run snapshot script (tries scripts/fetch_and_append.py, else Trancones)
         shell: bash
         env:
           ENDPOINT: ${{ secrets.ENDPOINT }}
         run: |
+          set -euo pipefail
           # Preferir scripts/fetch_and_append.py
           if [ -f "scripts/fetch_and_append.py" ]; then
             echo "Ejecutando scripts/fetch_and_append.py"
             python scripts/fetch_and_append.py
-          elif [ -f "trancones" ]; then
-            echo "Ejecutando archivo 'trancones'"
-            python trancones
+          elif [ -f "scripts/Trancones" ]; then
+            echo "Ejecutando scripts/Trancones"
+            python scripts/Trancones
+          elif [ -f "Trancones" ]; then
+            echo "Ejecutando Trancones"
+            python Trancones
           else
-            echo "No se encontró ni scripts/fetch_and_append.py ni 'trancones'. Listado de archivos:"
+            echo "No se encontró script. Listado:"
             ls -la
             exit 1
           fi
 
-      - name: Commit updated CSV files
+          echo "---- After script run: listing files in repo root ----"
+          ls -la
+
+          # Buscar cualquier CSV que coincida
+          echo "CSV matches:"
+          ls -la endpoint_history_*.csv || echo "No endpoint_history_*.csv found in repo root"
+
+          # Mostrar contenido de cualquier CSV encontrado (hasta 20 líneas)
+          for f in endpoint_history_*.csv; do
+            if [ -f "$f" ]; then
+              echo ">>> File: $f (head)"
+              head -n 20 "$f" || true
+            fi
+          done || true
+
+      - name: Commit updated CSV files (debug)
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          echo "Git status before add:"
+          git status --porcelain
+          echo "Adding files matching endpoint_history_*.csv"
+          git add endpoint_history_*.csv || true
+          echo "Git status after add:"
+          git status --porcelain
+          git commit -m "Snapshot $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "no changes to commit"
+          echo "Attempting git push..."
+          git push || (echo "git push falló"; git remote -v; exit 0)
           git config user.email "actions@github.com"
           # Añadir cualquier CSV mensual que se haya generado
           git add endpoint_history_*.csv || true
