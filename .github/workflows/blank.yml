@@ -45,6 +45,7 @@ jobs:
         shell: bash
         env:
           ENDPOINT: ${{ secrets.ENDPOINT }}
+          DEBUG_SAVE: 'true'
         run: |
           set -euo pipefail
           # Preferir scripts/fetch_and_append.py
@@ -64,6 +65,7 @@ jobs:
           fi
 
           echo "---- After script run: listing files in repo root ----"
+          pwd
           ls -la
 
           # Buscar cualquier CSV que coincida
@@ -77,6 +79,15 @@ jobs:
               head -n 20 "$f" || true
             fi
           done || true
+
+          # Si existe debug_response.txt mostrar un head y añadir al commit
+          if [ -f "debug_response.txt" ]; then
+            echo ">>> debug_response.txt content (head - 200):"
+            head -n 200 debug_response.txt || true
+            git add debug_response.txt || true
+          else
+            echo "No se encontró debug_response.txt"
+          fi
 
       - name: Commit updated CSV files (debug)
         shell: bash
@@ -92,8 +103,3 @@ jobs:
           git commit -m "Snapshot $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "no changes to commit"
           echo "Attempting git push..."
           git push || (echo "git push falló"; git remote -v; exit 0)
-          git config user.email "actions@github.com"
-          # Añadir cualquier CSV mensual que se haya generado
-          git add endpoint_history_*.csv || true
-          git commit -m "Snapshot $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "no changes to commit"
-          git push || echo "push falló (¿token/push rights?)"
