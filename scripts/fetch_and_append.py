@@ -1,14 +1,19 @@
+#!/usr/bin/env python3
 # scripts/fetch_and_append.py
-# Versión para endpoint que devuelve un array; imprime muestra del primer item para debug.
+# Versión robusta con manejo de "status:false" y debug opcional.
+
 import os
+import sys
+import time
+import json
+import hashlib
 import requests
 import pandas as pd
-import hashlib
-import json
-import time
 from datetime import datetime, timezone
 
 ENDPOINT = os.getenv("ENDPOINT")
+DEBUG_SAVE = os.getenv("DEBUG_SAVE", "false").lower() in ("1", "true", "yes")
+
 if not ENDPOINT:
     raise ValueError("No se encontró la variable de entorno ENDPOINT")
 
@@ -24,21 +29,25 @@ def fetch_json(url, attempts=5, delay=5):
                 return {"_raw_text": r.text}
         except Exception as e:
             last_exc = e
-            print(f"[fetch_json] intento {i+1} falló: {e}")
+            print(f"[fetch_json] intento {i+1} falló: {e}", file=sys.stderr)
             time.sleep(delay)
     raise RuntimeError(f"No fue posible obtener JSON tras {attempts} intentos. Última excepción: {last_exc}")
 
 def items_from_response(data):
-    # Si es lista, devolver lista de dicts (o envolver elementos no-dict)
+    """Normaliza la respuesta en una lista de diccionarios (items)."""
+    # Lista directa
     if isinstance(data, list):
-        return [item if isinstance(item, dict) else {"value": item} for item in data]
+        return [itm if isinstance(itm, dict) else {"value": itm} for itm in data]
 
-    # Si es dict, buscar claves comunes
+    # Dict
     if isinstance(data, dict):
+        # Si es {"status": False} o similar, devolver vacío y dejar que el caller detecte
+        # Buscamos claves comunes que contengan listas de registros
         for k in ("data","rows","results","items","features","values","records"):
             if k in data and isinstance(data[k], list):
                 return [itm if isinstance(itm, dict) else {"value": itm} for itm in data[k]]
 
+        # Caso columnas + data
         if "columns" in data and "data" in data and isinstance(data["columns"], list) and isinstance(data["data"], list):
             cols = data["columns"]
             rows = []
@@ -52,76 +61,91 @@ def items_from_response(data):
                 rows.append(mapped)
             return rows
 
-        all_values_are_dicts = all(isinstance(v, dict) for v in data.values())
-        if all_values_are_dicts and len(data) > 0:
-            subitems = []
+        # Si es dict de dicts (ej: key -> dict), convertir a lista
+        all_values_are_dicts = len(data) > 0 and all(isinstance(v, dict) for v in data.values())
+        if all_values_are_dicts:
+            out = []
             for k,v in data.items():
                 d = v.copy()
                 if "id" not in d:
                     d["_key"] = k
-                subitems.append(d)
-            return subitems
+                out.append(d)
+            return out
 
+        # Fallback: envolver el dict como un único item
         return [data]
 
+    # Otro tipo: envolver
     return [{"value": data}]
 
-def deep_find_any(item, candidates):
-    """Busca recursivamente en diccionarios y listas una clave que coincida (tolerante)."""
-    if item is None:
+def find_value_case_insensitive(d, candidates):
+    if not isinstance(d, dict):
         return None
-    if isinstance(item, dict):
-        for k,v in item.items():
-            for cand in candidates:
-                if isinstance(k, str) and k.lower() == cand.lower():
-                    return v
-            # intentar recursión
-            res = deep_find_any(v, candidates)
-            if res is not None:
-                return res
-        return None
-    if isinstance(item, list):
-        for elem in item:
-            res = deep_find_any(elem, candidates)
-            if res is not None:
-                return res
+    for name in candidates:
+        for k in d.keys():
+            if isinstance(k, str) and k.lower() == name.lower():
+                return d[k]
+    # búsqueda parcial (si la clave contiene el candidate)
+    for name in candidates:
+        for k in d.keys():
+            if isinstance(k, str) and name.lower() in k.lower().replace(" ", "").replace("_",""):
+                return d[k]
     return None
 
+def try_parse_time(val):
+    if val is None:
+        return None
+    try:
+        # epoch heurístico
+        if isinstance(val, (int, float)):
+            v = int(val)
+            if v > 1e12:
+                return datetime.fromtimestamp(v/1000.0, tz=timezone.utc).isoformat()
+            elif v > 1e9:
+                return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+            else:
+                return None
+        # cadena: dejar que pandas parsee
+        ts = pd.to_datetime(str(val), utc=True, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return ts.isoformat()
+    except Exception:
+        return None
+
 def extract_fields(item):
-    """Extrae scacodigo, scatipo, scanombre, source_time y payload."""
+    """Extrae scacodigo, scatipo, scanombre, source_time, payload (tolerante)."""
     if not isinstance(item, dict):
         payload = json.dumps(item, ensure_ascii=False)
         return {"scacodigo": None, "scatipo": None, "scanombre": None, "source_time": None, "payload": payload}
 
-    # unwrap common wrappers
+    # Unwrap comunes
     for wrapper in ("attributes","properties","fields","row"):
         if wrapper in item and isinstance(item[wrapper], dict):
             item = item[wrapper]
             break
 
-    # intenta encontrar campos con varios nombres posibles (busca recursivamente)
-    scacodigo = deep_find_any(item, ["SCACODIGO","scacodigo","scacod","codigo","id"])
-    scatipo   = deep_find_any(item, ["SCATIPO","scatipo","tipo","category"])
-    scanombre = deep_find_any(item, ["SCANOMBRE","scanombre","nombre","name","descripcion","description"])
+    scacodigo = find_value_case_insensitive(item, ["SCACODIGO","scacodigo","scacod","codigo","id"])
+    scatipo   = find_value_case_insensitive(item, ["SCATIPO","scatipo","tipo"])
+    scanombre = find_value_case_insensitive(item, ["SCANOMBRE","scanombre","nombre","name","desc"])
 
-    # tratar source_time (varios nombres)
-    source_time = deep_find_any(item, ["source_time","timestamp","time","fecha","date","created_at","hora"])
-    # normalizar simples timestamps numéricos o strings -> iso
-    try:
-        if isinstance(source_time, (int,float)):
-            if source_time > 1e12:
-                source_time = datetime.fromtimestamp(source_time/1000.0, tz=timezone.utc).isoformat()
-            elif source_time > 1e9:
-                source_time = datetime.fromtimestamp(source_time, tz=timezone.utc).isoformat()
-            else:
-                source_time = None
-        elif isinstance(source_time, str):
-            try:
-                source_time = pd.to_datetime(source_time, utc=True).isoformat()
-            except Exception:
-                pass
-    except Exception:
-        source_time = None
+    # intentar source_time
+    source_time = None
+    for cand in ("source_time","timestamp","time","fecha","date","created_at","hora"):
+        v = find_value_case_insensitive(item, [cand])
+        parsed = try_parse_time(v)
+        if parsed:
+            source_time = parsed
+            break
+
+    # fallback: buscar cualquier key con 'time'/'date'/'fecha' en su nombre
+    if source_time is None:
+        for k,v in item.items():
+            if isinstance(k, str) and any(s in k.lower() for s in ("time","date","fecha","hora","timestamp")):
+                parsed = try_parse_time(v)
+                if parsed:
+                    source_time = parsed
+                    break
 
     try:
         payload = json.dumps(item, ensure_ascii=False)
@@ -145,20 +169,25 @@ def main():
     csv_name = f"endpoint_history_{now.strftime('%Y-%m')}.csv"
 
     j = fetch_json(ENDPOINT)
-    items = items_from_response(j)
-    print(f"[main] Items detectados: {len(items)}")
-    # imprimir muestra del primer item para debugging
-    if len(items) > 0:
-        try:
-            sample = items[0]
-            print("[main] Ejemplo primer item (formateado):")
-            print(json.dumps(sample, ensure_ascii=False, indent=2))
-        except Exception as e:
-            print(f"[main] No pude imprimir el primer item: {e}")
 
+    # Si la API devuelve {"status": false} u otro indicador de "sin datos", no crear fila
+    if isinstance(j, dict) and j.get("status") is False:
+        print("[main] El endpoint devolvió {'status': false} => no hay datos para guardar. Respuesta completa:")
+        print(json.dumps(j, ensure_ascii=False))
+        if DEBUG_SAVE:
+            with open("debug_response.txt", "a", encoding="utf-8") as f:
+                f.write(f"{now.isoformat()} -> {json.dumps(j, ensure_ascii=False)}\n")
+        sys.exit(0)
+
+    # Normalizar items
+    items = items_from_response(j)
     if not items:
-        print("[main] No se detectaron items en la respuesta. Guardando la respuesta cruda en una fila.")
-        items = [ {"_raw": j} ]
+        print("[main] No se detectaron items en la respuesta. Respuesta completa:")
+        print(json.dumps(j, ensure_ascii=False))
+        if DEBUG_SAVE:
+            with open("debug_response.txt", "a", encoding="utf-8") as f:
+                f.write(f"{now.isoformat()} -> {json.dumps(j, ensure_ascii=False)}\n")
+        sys.exit(0)
 
     rows = []
     for it in items:
@@ -169,6 +198,7 @@ def main():
 
     new_df = pd.DataFrame(rows)
 
+    # Si existe CSV, concatenar y dedup por __hash
     if os.path.exists(csv_name):
         try:
             old = pd.read_csv(csv_name, dtype=str)
