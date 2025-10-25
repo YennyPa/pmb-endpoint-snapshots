@@ -1,0 +1,61 @@
+name: WAZE snapshot Bogotá (hourly, auto-stop Tue 2025-10-28)
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # cada hora UTC
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Check date and stop after 2025-10-28 (UTC)
+        shell: bash
+        run: |
+          # Fecha límite (inclusive) en UTC: 2025-10-31 23:59:59 UTC
+          LIM="2025-10-31T23:59:59Z"
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "Now (UTC): $NOW  — limit (UTC): $LIM"
+          if [[ "$NOW" > "$LIM" ]]; then
+            echo "La fecha límite ya pasó. Terminando job sin ejecutar."
+            exit 0
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests pandas python-dateutil
+
+      - name: Run snapshot script (tries scripts/fetch_and_append.py, else trancones)
+        shell: bash
+        env:
+          ENDPOINT: ${{ secrets.ENDPOINT }}
+        run: |
+          # Preferir scripts/fetch_and_append.py
+          if [ -f "scripts/fetch_and_append.py" ]; then
+            echo "Ejecutando scripts/fetch_and_append.py"
+            python scripts/fetch_and_append.py
+          elif [ -f "trancones" ]; then
+            echo "Ejecutando archivo 'trancones'"
+            python trancones
+          else
+            echo "No se encontró ni scripts/fetch_and_append.py ni 'trancones'. Listado de archivos:"
+            ls -la
+            exit 1
+          fi
+
+      - name: Commit updated CSV files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          # Añadir cualquier CSV mensual que se haya generado
+          git add endpoint_history_*.csv || true
+          git commit -m "Snapshot $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "no changes to commit"
+          git push || echo "push falló (¿token/push rights?)"
