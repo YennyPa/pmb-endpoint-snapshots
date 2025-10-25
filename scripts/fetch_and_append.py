@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # scripts/fetch_and_append.py
 # Versión final: evita guardar filas cuando la respuesta contiene {"status": false}
-# Imprime diagnósticos claros en los logs.
+# Imprime diagnósticos claros en los logs y puede escribir debug_response.txt si DEBUG_SAVE=true.
 
 import os
 import sys
@@ -166,7 +166,6 @@ def main():
     j = fetch_json(ENDPOINT)
     print("[main] JSON recibido (resumen):", end=" ")
     try:
-        # imprimir un resumen compacto
         print(json.dumps(j if isinstance(j, (dict,list)) else str(j))[:1000])
     except Exception:
         print(str(j)[:1000])
@@ -189,7 +188,7 @@ def main():
                 f.write(f"{now.isoformat()} -> {json.dumps(j, ensure_ascii=False)}\n")
         sys.exit(0)
 
-    # 4) Si la lista de items consiste en un solo item que es {'status': False}, también salir (protección extra)
+    # 4) Si la lista de items consiste en un solo item que es {'status': False}, también salir
     if len(items) == 1 and isinstance(items[0], dict) and items[0].get("status") is False:
         print("[main] Único item y es {'status': false'} -> no se guardará.")
         if DEBUG_SAVE:
@@ -201,7 +200,6 @@ def main():
     rows = []
     for it in items:
         r = extract_fields(it)
-        # Si payload exactamente '{"status": false}' saltar
         try:
             payload_obj = json.loads(r["payload"])
             if isinstance(payload_obj, dict) and payload_obj.get("status") is False:
@@ -240,6 +238,10 @@ def main():
     else:
         new_df.to_csv(csv_name, index=False)
         print(f"[main] Guardado {len(new_df)} filas en {csv_name}")
+
+if __name__ == "__main__":
+    main()
+
 
 if __name__ == "__main__":
     main()
