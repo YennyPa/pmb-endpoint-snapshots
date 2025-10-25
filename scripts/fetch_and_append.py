@@ -42,13 +42,14 @@ def main():
             continue
         for rec in frame.get("data", []):
             scacodigo = rec.get("ID")
-            value = rec.get("VALUE")
-            payload = json.dumps({"VALUE": value}, ensure_ascii=False)
+            value1 = rec.get("VALUE")
+            payload = json.dumps({"VALUE": value1}, ensure_ascii=False)
             row = {
                 "scacodigo": scacodigo,
                 "scatipo": None,
                 "scanombre": None,
                 "source_time": frame_ts,
+                "value1": value1,
                 "payload": payload,
                 "timestamp_utc": now.isoformat()
             }
@@ -65,20 +66,4 @@ def main():
     if os.path.exists(csv_name):
         try:
             old = pd.read_csv(csv_name, dtype=str)
-            if "__hash" not in old.columns:
-                old["__hash"] = old.apply(lambda r: hashlib.sha256(
-                    (str(r.get("scacodigo") or "") + "|" + str(r.get("source_time") or "") + "|" + str(r.get("payload") or "")).encode("utf-8")
-                ).hexdigest(), axis=1)
-            combined = pd.concat([old, new_df], ignore_index=True, sort=False)
-            combined = combined.drop_duplicates(subset="__hash", keep="first")
-            combined.to_csv(csv_name, index=False)
-            print(f"[main] Archivo actualizado. Total filas: {len(combined)}")
-        except Exception as e:
-            print(f"[main] Error actualizando CSV: {e}. Se guarda solo lo nuevo.")
-            new_df.to_csv(csv_name, index=False)
-    else:
-        new_df.to_csv(csv_name, index=False)
-        print(f"[main] Nuevo CSV creado. Filas guardadas: {len(new_df)}")
-
-if __name__ == "__main__":
-    main()
+            if "__hash
